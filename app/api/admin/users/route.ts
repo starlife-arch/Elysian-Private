@@ -1,3 +1,4 @@
+export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server"; import { requireAuth,getUserDoc } from "@/lib/auth-server"; import { adminDb } from "@/lib/firebase-admin";
 async function assertAdmin(uid:string){const {data}=await getUserDoc(uid); if(data?.role!=='admin') throw new Error('forbidden');}
 export async function GET(){const a=await requireAuth(); await assertAdmin(a.uid); const q=await adminDb.collection('users').limit(200).get(); return NextResponse.json({users:q.docs.map(d=>d.data())});}
