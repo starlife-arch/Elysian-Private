@@ -12,12 +12,13 @@ from utils.payments import create_pesapal_checkout, create_stripe_checkout
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-this-in-production")
 
-db = get_firestore()
-auth = get_auth()
-
 
 def utcnow():
     return datetime.now(timezone.utc)
+
+
+def db():
+    return get_firestore()
 
 
 def login_required(fn):
@@ -31,25 +32,26 @@ def login_required(fn):
 
 
 def get_user(uid):
-    doc = db.collection("users").document(uid).get()
+    doc = db().collection("users").document(uid).get()
     return doc.to_dict() if doc.exists else None
 
 
 def has_member_access(user):
-    if not user:
+    if not user or user.get("banned"):
         return False
-    if user.get("banned"):
-        return False
-
     now = utcnow()
     if user.get("manual_access"):
         expiry = user.get("access_expiry_date")
         if expiry and expiry < now:
-            db.collection("users").document(user["uid"]).update({"manual_access": False})
+            db().collection("users").document(user["uid"]).update({"manual_access": False})
             return False
         return True
+    return bool(user.get("invite_used") and user.get("paid"))
 
-    return user.get("invite_used") and user.get("paid")
+
+@app.context_processor
+def inject_auth():
+    return {"auth_enabled": bool(get_auth())}
 
 
 @app.route("/")
@@ -84,11 +86,12 @@ def apply():
             flash("Applicants must be 18+.", "error")
             return redirect(url_for("apply"))
 
-        email = request.form.get("email", "").strip().lower()
         uid = request.form.get("uid", "").strip()
-        files = request.files.getlist("photos")
-        photo_urls = upload_user_photos(files, folder="private-dating")
+        if not uid:
+            flash("Firebase UID is required.", "error")
+            return redirect(url_for("apply"))
 
+        photo_urls = upload_user_photos(request.files.getlist("photos"), folder="private-dating")
         user_payload = {
             "uid": uid,
             "full_name": request.form.get("full_name", "").strip(),
@@ -96,7 +99,7 @@ def apply():
             "gender": request.form.get("gender", "").strip(),
             "country": request.form.get("country", "").strip(),
             "city": request.form.get("city", "").strip(),
-            "email": email,
+            "email": request.form.get("email", "").strip().lower(),
             "bio": request.form.get("bio", "").strip(),
             "photo_urls": photo_urls,
             "status": "pending",
@@ -113,164 +116,117 @@ def apply():
             "invite_override": False,
             "created_at": utcnow(),
         }
-        db.collection("users").document(uid).set(user_payload, merge=True)
+        db().collection("users").document(uid).set(user_payload, merge=True)
         flash("Application submitted. Status: pending.", "success")
         return redirect(url_for("login"))
     return render_template("apply.html")
 
-
-@app.route("/post-login")
+@app.route('/post-login')
 @login_required
 def post_login_gate():
-    uid = session["uid"]
-    user = get_user(uid)
+    user = get_user(session['uid'])
     if has_member_access(user):
-        return redirect(url_for("dashboard"))
+        return redirect(url_for('dashboard'))
+    if user.get('invite_override') or user.get('invite_used'):
+        return redirect(url_for('payment'))
+    return redirect(url_for('invite'))
 
-    if user.get("invite_override") or user.get("invite_used"):
-        return redirect(url_for("payment"))
-    return redirect(url_for("invite"))
-
-
-@app.route("/invite", methods=["GET", "POST"])
+@app.route('/invite', methods=['GET','POST'])
 @login_required
 def invite():
-    uid = session["uid"]
-    user = get_user(uid)
-    if request.method == "POST":
-        code = request.form.get("invite_code", "").strip().upper()
-        valid, message = validate_invite_code(db, uid, code)
-        flash(message, "success" if valid else "error")
+    uid = session['uid']
+    if request.method == 'POST':
+        valid, message = validate_invite_code(db(), uid, request.form.get('invite_code','').strip().upper())
+        flash(message, 'success' if valid else 'error')
         if valid:
-            return redirect(url_for("payment"))
-    return render_template("invite.html", user=user)
+            return redirect(url_for('payment'))
+    return render_template('invite.html')
 
-
-@app.route("/payment", methods=["GET", "POST"])
+@app.route('/payment', methods=['GET','POST'])
 @login_required
 def payment():
-    uid = session["uid"]
-    user = get_user(uid)
-    if request.method == "POST":
-        provider = request.form.get("provider")
-        if provider == "stripe":
-            checkout_url = create_stripe_checkout(uid)
-        else:
-            checkout_url = create_pesapal_checkout(uid)
-        db.collection("users").document(uid).update({"paid": True, "payment_provider": provider})
-        flash(f"Payment marked successful via {provider}.", "success")
+    uid = session['uid']
+    if request.method == 'POST':
+        provider = request.form.get('provider')
+        checkout_url = create_stripe_checkout(uid) if provider == 'stripe' else create_pesapal_checkout(uid)
+        db().collection('users').document(uid).update({'paid': True, 'payment_provider': provider})
+        flash(f'Payment marked successful via {provider}.', 'success')
         return redirect(checkout_url)
-    return render_template("payment.html", user=user)
+    return render_template('payment.html')
 
-
-@app.route("/dashboard")
+@app.route('/dashboard')
 @login_required
 def dashboard():
-    uid = session["uid"]
-    user = get_user(uid)
-    if user.get("banned"):
-        flash("Account suspended. Contact support.", "error")
+    user = get_user(session['uid'])
+    if user.get('banned'):
+        flash('Account suspended. Contact support.', 'error')
         session.clear()
-        return redirect(url_for("login"))
+        return redirect(url_for('login'))
     if not has_member_access(user):
-        flash("Complete invite and payment requirements.", "error")
-        return redirect(url_for("post_login_gate"))
-
-    profiles = [d.to_dict() for d in db.collection("users").where("status", "==", "approved").stream()]
-    return render_template("dashboard.html", user=user, profiles=profiles)
+        flash('Complete invite and payment requirements.', 'error')
+        return redirect(url_for('post_login_gate'))
+    profiles = [d.to_dict() for d in db().collection('users').where('status', '==', 'approved').stream()]
+    return render_template('dashboard.html', user=user, profiles=profiles)
 
 
 def role_level(role):
-    return {"user": 1, "moderator": 2, "admin": 3, "super_admin": 4}.get(role, 1)
+    return {'user': 1, 'moderator': 2, 'admin': 3, 'super_admin': 4}.get(role, 1)
 
 
-def admin_required(min_role="admin"):
+def admin_required(min_role='admin'):
     def deco(fn):
         @wraps(fn)
         def wrapper(*args, **kwargs):
-            uid = session.get("uid")
-            user = get_user(uid) if uid else None
-            if not user or role_level(user.get("role", "user")) < role_level(min_role):
-                flash("Admin permission required.", "error")
-                return redirect(url_for("login"))
+            actor = get_user(session.get('uid')) if session.get('uid') else None
+            if not actor or role_level(actor.get('role', 'user')) < role_level(min_role):
+                flash('Admin permission required.', 'error')
+                return redirect(url_for('login'))
             return fn(*args, **kwargs)
-
         return wrapper
-
     return deco
 
-
-@app.route("/admin", methods=["GET", "POST"])
+@app.route('/admin', methods=['GET','POST'])
 @login_required
-@admin_required("admin")
+@admin_required('admin')
 def admin_dashboard():
-    if request.method == "POST":
-        action = request.form.get("action")
-        target_uid = request.form.get("target_uid")
-        ref = db.collection("users").document(target_uid)
-        target = ref.get().to_dict() or {}
-
-        if action == "approve":
-            ref.update({"status": "approved", "invite_code": generate_invite_code(), "invite_used": False})
-        elif action == "reject":
-            ref.update({"status": "rejected"})
-        elif action == "manual_access":
-            days = request.form.get("days", "30")
+    if request.method == 'POST':
+        action = request.form.get('action')
+        target_uid = request.form.get('target_uid')
+        ref = db().collection('users').document(target_uid)
+        if action == 'approve':
+            ref.update({'status': 'approved', 'invite_code': generate_invite_code(), 'invite_used': False})
+        elif action == 'reject':
+            ref.update({'status': 'rejected'})
+        elif action == 'manual_access':
+            days = request.form.get('days', '30')
             start = utcnow()
-            expiry = None if days == "permanent" else start + timedelta(days=int(days))
-            ref.update({"manual_access": True, "access_start_date": start, "access_expiry_date": expiry})
-        elif action == "revoke_manual_access":
-            ref.update({"manual_access": False, "access_start_date": None, "access_expiry_date": None})
-        elif action == "ban":
-            ref.update({"banned": True})
-        elif action == "unban":
-            ref.update({"banned": False})
-        elif action == "set_role":
-            actor = get_user(session["uid"])
-            if actor.get("role") == "super_admin":
-                ref.update({"role": request.form.get("role")})
-        elif action == "edit_record":
-            payload = {
-                "full_name": request.form.get("full_name"),
-                "email": request.form.get("email"),
-                "country": request.form.get("country"),
-                "invite_code": request.form.get("invite_code"),
-                "paid": request.form.get("paid") == "true",
-            }
-            ref.update(payload)
+            expiry = None if days == 'permanent' else start + timedelta(days=int(days))
+            ref.update({'manual_access': True, 'access_start_date': start, 'access_expiry_date': expiry})
+        elif action == 'revoke_manual_access':
+            ref.update({'manual_access': False, 'access_start_date': None, 'access_expiry_date': None})
+        elif action == 'ban':
+            ref.update({'banned': True})
+        elif action == 'unban':
+            ref.update({'banned': False})
+        flash('Admin action completed.', 'success')
+        return redirect(url_for('admin_dashboard'))
 
-        flash("Admin action completed.", "success")
-        return redirect(url_for("admin_dashboard"))
-
-    users = [d.to_dict() for d in db.collection("users").stream()]
+    users = [d.to_dict() for d in db().collection('users').stream()]
     now = utcnow()
     stats = {
-        "pending": sum(u.get("status") == "pending" for u in users),
-        "approved": sum(u.get("status") == "approved" for u in users),
-        "paid": sum(bool(u.get("paid")) for u in users),
-        "manual": sum(bool(u.get("manual_access")) for u in users),
-        "banned": sum(bool(u.get("banned")) for u in users),
-        "expired": sum(bool(u.get("access_expiry_date") and u["access_expiry_date"] < now) for u in users),
+        'pending': sum(u.get('status') == 'pending' for u in users),
+        'approved': sum(u.get('status') == 'approved' for u in users),
+        'paid': sum(bool(u.get('paid')) for u in users),
+        'manual': sum(bool(u.get('manual_access')) for u in users),
+        'banned': sum(bool(u.get('banned')) for u in users),
+        'expired': sum(bool(u.get('access_expiry_date') and u['access_expiry_date'] < now) for u in users),
     }
-    q = request.args.get("q", "").lower().strip()
-    status = request.args.get("status", "all")
-    filtered = []
-    for u in users:
-        blob = f"{u.get('full_name','')} {u.get('email','')} {u.get('country','')} {u.get('city','')}".lower()
-        if q and q not in blob:
-            continue
-        if status != "all" and str(u.get("status")) != status:
-            continue
-        filtered.append(u)
+    return render_template('admin.html', users=users, stats=stats)
 
-    return render_template("admin.html", users=filtered, stats=stats)
+@app.errorhandler(Exception)
+def handle_exception(exc):
+    app.logger.exception('Unhandled error: %s', exc)
+    return render_template('error.html', error='Service temporarily unavailable.'), 500
 
-
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for("index"))
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=True)

@@ -1,19 +1,29 @@
+import json
 import os
+
 import firebase_admin
 from firebase_admin import auth, credentials, firestore
 
 _app = None
 
+
 def _init():
     global _app
-    if _app:
+    if _app is not None:
         return _app
+
     cred_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
-    if cred_path and os.path.exists(cred_path):
+    cred_json = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
+
+    if cred_json:
+        cred = credentials.Certificate(json.loads(cred_json))
+        _app = firebase_admin.initialize_app(cred)
+    elif cred_path and os.path.exists(cred_path):
         cred = credentials.Certificate(cred_path)
         _app = firebase_admin.initialize_app(cred)
     else:
         _app = firebase_admin.initialize_app()
+
     return _app
 
 
