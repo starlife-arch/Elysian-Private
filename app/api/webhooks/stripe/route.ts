@@ -1,0 +1,3 @@
+import { headers } from "next/headers"; import Stripe from "stripe"; import { adminDb } from "@/lib/firebase-admin";
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
+export async function POST(req:Request){ const sig=headers().get('stripe-signature')||''; const raw=await req.text(); const e=stripe.webhooks.constructEvent(raw,sig,process.env.STRIPE_WEBHOOK_SECRET||''); if(e.type==='checkout.session.completed'){ const s=e.data.object as Stripe.Checkout.Session; const uid=s.metadata?.uid; if(uid) await adminDb.collection('users').doc(uid).set({paid:true,status:'active',updatedAt:new Date().toISOString()},{merge:true}); } return new Response('ok'); }
