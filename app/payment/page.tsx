@@ -1,3 +1,0 @@
-"use client";
-import { auth } from "@/lib/firebase-client";
-export default function Payment(){return <div className='card'><h2>Payment</h2><p>Select provider.</p><button onClick={async()=>{const t=await auth.currentUser?.getIdToken(); const r=await fetch('/api/payments/stripe-session',{method:'POST',headers:{Authorization:`Bearer ${t}`}}); const j=await r.json(); window.location.href=j.url;}}>Pay with Stripe</button><button onClick={async()=>{const t=await auth.currentUser?.getIdToken(); const r=await fetch('/api/payments/pesapal-session',{method:'POST',headers:{Authorization:`Bearer ${t}`}}); const j=await r.json(); window.location.href=j.url;}}>Pay with Pesapal</button></div>}

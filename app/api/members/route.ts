@@ -1,3 +1,0 @@
-export const dynamic = 'force-dynamic';
-import { NextResponse } from "next/server"; import { requireAuth,getUserDoc } from "@/lib/auth-server"; import { hasMemberAccess } from "@/lib/access"; import { getAdminDb } from "@/lib/firebase-admin";
-export async function GET(){ const a=await requireAuth(); const {data}=await getUserDoc(a.uid); if(!data||!hasMemberAccess(data)) return NextResponse.json({message:'Access denied'},{status:403}); const q=await getAdminDb().collection('users').where('status','==','active').limit(40).get(); return NextResponse.json({profiles:q.docs.map(d=>d.data())}); }
